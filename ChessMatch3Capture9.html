@@ -1,0 +1,624 @@
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chess Match ∞</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+    
+    <!-- React & Babel for in-browser execution -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@19",
+    "react-dom/client": "https://esm.sh/react-dom@19/client",
+    "lucide-react": "https://esm.sh/lucide-react@0.475.0",
+    "vite": "https://esm.sh/vite@^7.3.0",
+    "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2"
+  }
+}
+</script>
+
+    <style>
+        @keyframes pop {
+            0% { transform: scale(0); opacity: 1; }
+            20% { transform: scale(1.2); opacity: 1; }
+            100% { transform: scale(0.2) translate(var(--tx), var(--ty)); opacity: 0; }
+        }
+        .particle {
+            position: absolute;
+            width: var(--size, 6px);
+            height: var(--size, 6px);
+            border-radius: 50%;
+            animation: pop 0.7s cubic-bezier(0.1, 0.8, 0.3, 1) forwards;
+            box-shadow: 0 0 10px var(--glow-color);
+        }
+        .piece-transition {
+            transition: transform 0.3s cubic-bezier(0.4, 0.0, 0.2, 1);
+        }
+        @keyframes float-score {
+            0% { transform: translateY(0); opacity: 1; }
+            100% { transform: translateY(-50px); opacity: 0; }
+        }
+        .score-float {
+            animation: float-score 1s ease-out forwards;
+        }
+        @keyframes hint-pulse {
+            0% { box-shadow: inset 0 0 15px 2px rgba(245, 158, 11, 0.6); }
+            50% { box-shadow: inset 0 0 25px 6px rgba(245, 158, 11, 0.9); }
+            100% { box-shadow: inset 0 0 15px 2px rgba(245, 158, 11, 0.6); }
+        }
+        .hint-cell {
+            animation: hint-pulse 1.5s infinite ease-in-out;
+            /* Usamos box-shadow para evitar que el layout se mueva (distorsión) */
+            z-index: 45;
+        }
+        /* Overlay para el borde del hint sin afectar el box-model */
+        .hint-cell::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            border: 3px solid #f59e0b;
+            pointer-events: none;
+            opacity: 0.7;
+        }
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #020617; /* bg-slate-950 */
+            font-family: system-ui, -apple-system, sans-serif;
+        }
+        .glass-panel {
+            background: rgba(15, 23, 42, 0.8);
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(51, 65, 85, 0.5);
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { 
+            Trophy, RefreshCw, Info, X, Volume2, VolumeX, Swords, 
+            Minus, Plus, Timer, History, Music, Zap, Lightbulb 
+        } from 'lucide-react';
+
+        // --- CONSTANTS ---
+        const BOARD_SIZE = 8;
+        const TYPES = ['rook', 'knight', 'bishop', 'queen', 'king'];
+        const COLORS = ['white', 'black'];
+        const PIECE_POINTS = { knight: 100, bishop: 80, rook: 60, king: 40, queen: 20 };
+        
+        const BOARD_THEMES = {
+            blue: { name: 'Océano', light: 'bg-blue-300', dark: 'bg-blue-600', border: 'border-blue-800', bg: 'bg-blue-900', grid: 'bg-blue-800' },
+            wood: { name: 'Madera', light: 'bg-amber-200', dark: 'bg-amber-700', border: 'border-amber-900', bg: 'bg-amber-950', grid: 'bg-amber-900' },
+            green: { name: 'Menta', light: 'bg-emerald-300', dark: 'bg-emerald-600', border: 'border-emerald-800', bg: 'bg-emerald-900', grid: 'bg-emerald-800' },
+            pink: { name: 'Chicle', light: 'bg-pink-300', dark: 'bg-pink-500', border: 'border-pink-800', bg: 'bg-pink-900', grid: 'bg-pink-800' },
+        };
+        
+        const UNICODE_ICONS = {
+            king: { white: '♔', black: '♚' },
+            queen: { white: '♕', black: '♛' },
+            rook: { white: '♖', black: '♜' },
+            bishop: { white: '♗', black: '♝' },
+            knight: { white: '♘', black: '♞' },
+        };
+        const FONT_AWESOME_ICONS = {
+            king: 'fa-chess-king',
+            queen: 'fa-chess-queen',
+            rook: 'fa-chess-rook',
+            bishop: 'fa-chess-bishop',
+            knight: 'fa-chess-knight',
+        };
+        const PIECE_EXPLOSION_COLORS = {
+            rook: '#ef4444', knight: '#6366f1', bishop: '#10b981', queen: '#d946ef', king: '#f59e0b',
+        };
+
+        // --- AUDIO ENGINE ---
+        const SCALE = [261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88, 523.25, 587.33, 659.25, 698.46, 783.99, 880.00, 987.77, 1046.50];
+        const playSound = (effect, noteIndex = 0, soundEnabled, soundSet) => {
+            if (!soundEnabled) return;
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            if (!AudioContextClass) return;
+            const ctx = new AudioContextClass();
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+
+            if (soundSet === 'classic') {
+                switch (effect) {
+                    case 'select':
+                        const baseFreq = SCALE[Math.min(noteIndex, SCALE.length - 1)];
+                        osc.type = 'sine';
+                        osc.frequency.setValueAtTime(baseFreq, now);
+                        gain.gain.setValueAtTime(0.1, now);
+                        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+                        osc.start(now); osc.stop(now + 0.1);
+                        break;
+                    case 'match':
+                        [0, 0.1, 0.2].forEach((delay, i) => {
+                            const o = ctx.createOscillator(); const g = ctx.createGain();
+                            o.connect(g); g.connect(ctx.destination);
+                            o.type = 'triangle'; o.frequency.value = [523.25, 659.25, 783.99][i];
+                            g.gain.setValueAtTime(0.1, now + delay);
+                            g.gain.exponentialRampToValueAtTime(0.01, now + delay + 0.3);
+                            o.start(now + delay); o.stop(now + delay + 0.3);
+                        });
+                        break;
+                    case 'error':
+                        osc.type = 'sawtooth'; osc.frequency.value = 150;
+                        gain.gain.setValueAtTime(0.1, now);
+                        gain.gain.linearRampToValueAtTime(0, now + 0.2);
+                        osc.start(now); osc.stop(now + 0.2);
+                        break;
+                }
+            } else {
+                switch (effect) {
+                    case 'select':
+                        const baseFreqGal = SCALE[Math.min(noteIndex, SCALE.length - 1)] * 2;
+                        osc.type = 'square'; osc.frequency.setValueAtTime(baseFreqGal, now);
+                        gain.gain.setValueAtTime(0.05, now);
+                        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+                        osc.start(now); osc.stop(now + 0.1);
+                        break;
+                    case 'match':
+                        [0, 0.1, 0.2].forEach((delay, i) => {
+                            const o = ctx.createOscillator(); const g = ctx.createGain();
+                            o.connect(g); g.connect(ctx.destination);
+                            o.type = 'sawtooth'; o.frequency.value = [523.25, 659.25, 783.99][i] * 2;
+                            g.gain.setValueAtTime(0.05, now + delay);
+                            g.gain.exponentialRampToValueAtTime(0.001, now + delay + 0.5);
+                            o.start(now + delay); o.stop(now + delay + 0.5);
+                        });
+                        break;
+                    case 'error':
+                        osc.type = 'square'; osc.frequency.setValueAtTime(100, now);
+                        gain.gain.setValueAtTime(0.1, now);
+                        gain.gain.linearRampToValueAtTime(0, now + 0.3);
+                        osc.start(now + 0.3);
+                        break;
+                }
+            }
+        };
+
+        // --- GAME HELPERS ---
+        const isValidChessMove = (r1, c1, r2, c2, type) => {
+            const dx = Math.abs(c2 - c1);
+            const dy = Math.abs(r2 - r1);
+            if (dx === 0 && dy === 0) return false;
+            switch (type) {
+                case 'rook': return dx === 0 || dy === 0;
+                case 'bishop': return dx === dy;
+                case 'knight': return (dx === 1 && dy === 2) || (dx === 2 && dy === 1);
+                case 'queen': return dx === 0 || dy === 0 || dx === dy;
+                case 'king': return dx <= 1 && dy <= 1;
+                default: return false;
+            }
+        };
+
+        const generateRandomPiece = (isNew = true) => ({
+            id: Math.random().toString(36).substring(2, 11),
+            type: TYPES[Math.floor(Math.random() * TYPES.length)],
+            color: COLORS[Math.floor(Math.random() * COLORS.length)],
+            isNew
+        });
+
+        const isMatch3Logic = (p1, p2, p3) => {
+            if (!p1 || !p2 || !p3) return false;
+            return p1.type === p2.type && p1.color === p2.color && p2.type === p3.type && p2.color === p3.color;
+        };
+
+        const createInitialBoard = () => {
+            const board = Array(BOARD_SIZE).fill(null).map(() => Array(BOARD_SIZE).fill(null));
+            for (let r = 0; r < BOARD_SIZE; r++) {
+                for (let c = 0; c < BOARD_SIZE; c++) {
+                    let piece;
+                    do { piece = generateRandomPiece(true); } while (
+                        (c >= 2 && isMatch3Logic(piece, board[r][c - 1], board[r][c - 2])) ||
+                        (r >= 2 && isMatch3Logic(piece, board[r - 1][c], board[r - 2][c]))
+                    );
+                    board[r][c] = piece;
+                }
+            }
+            return board;
+        };
+
+        // --- COMPONENTS ---
+        function RulesModal({ onClose }) {
+            return (
+                <div className="fixed inset-0 bg-black/95 backdrop-blur-md z-[100] flex items-center justify-center p-4">
+                    <div className="bg-slate-900 border border-slate-700 w-full max-w-md rounded-3xl overflow-hidden shadow-2xl relative">
+                        <button onClick={onClose} className="absolute top-5 right-5 p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-full transition-all">
+                            <X size={24} />
+                        </button>
+                        <div className="p-8">
+                            <div className="flex items-center gap-4 mb-8">
+                                <div className="p-3.5 bg-amber-500/10 rounded-2xl border border-amber-500/30">
+                                    <Info className="text-amber-500" size={32} />
+                                </div>
+                                <h2 className="text-3xl font-black text-white italic tracking-tighter uppercase">Guía Maestro</h2>
+                            </div>
+                            <div className="space-y-6 text-slate-300">
+                                <section className="bg-slate-800/30 p-4 rounded-2xl border border-slate-700/50">
+                                    <h3 className="text-amber-400 font-black text-xs uppercase tracking-widest mb-2">Lógica Match-3</h3>
+                                    <p className="text-sm">Conecta 3+ piezas del mismo color y tipo para puntuar.</p>
+                                </section>
+                                <section className="bg-slate-800/30 p-4 rounded-2xl border border-slate-700/50">
+                                    <h3 className="text-blue-400 font-black text-xs uppercase tracking-widest mb-2">Movimiento Ajedrez</h3>
+                                    <p className="text-sm">Cada pieza solo puede saltar a la siguiente siguiendo sus reglas de ajedrez.</p>
+                                </section>
+                                <div className="grid grid-cols-2 gap-2 text-[10px] font-black uppercase text-slate-400">
+                                    <div className="bg-slate-950 p-2 rounded-lg border border-slate-800 text-center">Torre: Cruz</div>
+                                    <div className="bg-slate-950 p-2 rounded-lg border border-slate-800 text-center">Alfil: Diagonal</div>
+                                    <div className="bg-slate-950 p-2 rounded-lg border border-slate-800 text-center">Caballo: L</div>
+                                    <div className="bg-slate-950 p-2 rounded-lg border border-slate-800 text-center">Reina: Libre</div>
+                                </div>
+                            </div>
+                            <button onClick={onClose} className="w-full mt-8 py-4 bg-gradient-to-r from-amber-500 to-orange-600 text-slate-950 font-black rounded-2xl transition-all shadow-xl hover:shadow-orange-500/20 active:scale-95 uppercase tracking-widest">
+                                Entrar al Tablero
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        function App() {
+            const [board, setBoard] = useState(createInitialBoard());
+            const [chain, setChain] = useState([]);
+            const [score, setScore] = useState(0);
+            const [explosions, setExplosions] = useState([]);
+            const [floatingScores, setFloatingScores] = useState([]);
+            const [gameMode, setGameMode] = useState('normal');
+            const [blitzTime, setBlitzTime] = useState(60);
+            const [isGameOver, setIsGameOver] = useState(false);
+            const [isProcessing, setIsProcessing] = useState(false);
+            const [message, setMessage] = useState("¡Selecciona una pieza!");
+            const [pieceSet, setPieceSet] = useState('fa');
+            const [pieceSize, setPieceSize] = useState(28);
+            const [showRules, setShowRules] = useState(false);
+            const [boardTheme, setBoardTheme] = useState('blue');
+            const [soundEnabled, setSoundEnabled] = useState(true);
+            const [soundSet, setSoundSet] = useState('classic');
+            const [isHintActive, setIsHintActive] = useState(false);
+
+            const timerRef = useRef(null);
+
+            // Calcular sugerencias (Hints) de forma reactiva
+            const hintedMoves = useMemo(() => {
+                if (!isHintActive || isProcessing || isGameOver) return [];
+                
+                let candidates = [];
+                if (chain.length > 0) {
+                    const last = chain[chain.length - 1];
+                    const firstPiece = board[chain[0].r][chain[0].c];
+                    const lastPiece = board[last.r][last.c];
+
+                    if (!firstPiece || !lastPiece) return [];
+
+                    for (let r = 0; r < BOARD_SIZE; r++) {
+                        for (let c = 0; c < BOARD_SIZE; c++) {
+                            const piece = board[r][c];
+                            if (!piece) continue;
+                            const isInChain = chain.some(p => p.r === r && p.c === c);
+                            if (!isInChain && piece.type === firstPiece.type && piece.color === firstPiece.color) {
+                                if (isValidChessMove(last.r, last.c, r, c, lastPiece.type)) {
+                                    candidates.push({ r, c });
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Buscar cualquier primer movimiento viable
+                    outer: for (let r = 0; r < BOARD_SIZE; r++) {
+                        for (let c = 0; c < BOARD_SIZE; c++) {
+                            const piece = board[r][c];
+                            if (!piece) continue;
+                            for (let r2 = 0; r2 < BOARD_SIZE; r2++) {
+                                for (let c2 = 0; c2 < BOARD_SIZE; c2++) {
+                                    if (r === r2 && c === c2) continue;
+                                    const piece2 = board[r2][c2];
+                                    if (piece2 && piece2.type === piece.type && piece2.color === piece.color) {
+                                        if (isValidChessMove(r, c, r2, c2, piece.type)) {
+                                            candidates.push({ r, c });
+                                            break outer;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return candidates;
+            }, [isHintActive, chain, board, isProcessing, isGameOver]);
+
+            useEffect(() => {
+                if (gameMode === 'blitz' && !isGameOver && !isProcessing && !showRules) {
+                    timerRef.current = setInterval(() => {
+                        setBlitzTime(prev => {
+                            if (prev <= 1) { handleGameOver(); return 0; }
+                            return prev - 1;
+                        });
+                    }, 1000);
+                } else { clearInterval(timerRef.current); }
+                return () => clearInterval(timerRef.current);
+            }, [gameMode, isGameOver, isProcessing, showRules]);
+
+            const handleGameOver = () => {
+                setIsGameOver(true);
+                playSound('error', 0, soundEnabled, soundSet);
+            };
+
+            const triggerExplosion = (coords, type) => {
+                const color = PIECE_EXPLOSION_COLORS[type];
+                const newExplosions = coords.map((c, i) => ({ id: Date.now() + i, r: c.r, c: c.c, color }));
+                setExplosions(prev => [...prev, ...newExplosions]);
+                setTimeout(() => setExplosions(prev => prev.filter(e => !newExplosions.find(ne => ne.id === e.id))), 800);
+            };
+
+            const processMatches = (currentBoard, matches, isCombo = false) => {
+                setIsProcessing(true);
+                playSound('match', 0, soundEnabled, soundSet);
+                const newBoard = currentBoard.map(row => [...row]);
+                let matchedType = 'knight';
+                const firstMatchKey = Array.from(matches)[0];
+                if (firstMatchKey) {
+                    const [r, c] = firstMatchKey.split(',').map(Number);
+                    matchedType = currentBoard[r][c]?.type || 'knight';
+                }
+                const matchCoords = [];
+                matches.forEach(key => {
+                    const [r, c] = key.split(',').map(Number);
+                    matchCoords.push({ r, c });
+                    newBoard[r][c] = null;
+                });
+                triggerExplosion(matchCoords, matchedType);
+                const baseScore = PIECE_POINTS[matchedType] || 10;
+                const gainedPoints = Math.floor(baseScore * matches.size * (isCombo ? 2 : 1));
+                setScore(s => s + gainedPoints);
+                const mid = matchCoords[Math.floor(matchCoords.length/2)];
+                const scoreId = Date.now();
+                setFloatingScores(prev => [...prev, { id: scoreId, r: mid.r, c: mid.c, value: gainedPoints }]);
+                setTimeout(() => setFloatingScores(prev => prev.filter(f => f.id !== scoreId)), 1000);
+                setMessage(isCombo ? `¡COMBO! +${gainedPoints}` : `¡SERIE! +${gainedPoints}`);
+                if (gameMode === 'blitz') setBlitzTime(prev => Math.min(99, prev + 5));
+                setBoard(newBoard);
+                setTimeout(() => fillBoard(newBoard), 400);
+            };
+
+            const fillBoard = (currentBoard) => {
+                const newBoard = currentBoard.map(row => [...row]);
+                for (let c = 0; c < BOARD_SIZE; c++) {
+                    let emptySlots = 0;
+                    for (let r = BOARD_SIZE - 1; r >= 0; r--) {
+                        if (newBoard[r][c] === null) emptySlots++;
+                        else if (emptySlots > 0) {
+                            newBoard[r + emptySlots][c] = newBoard[r][c];
+                            newBoard[r][c] = null;
+                        }
+                    }
+                    for (let r = 0; r < emptySlots; r++) newBoard[r][c] = generateRandomPiece(false);
+                }
+                setBoard(newBoard);
+                const matches = findAutoMatches(newBoard);
+                if (matches.size > 0) setTimeout(() => processMatches(newBoard, matches, true), 400);
+                else setIsProcessing(false);
+            };
+
+            const findAutoMatches = (currentBoard) => {
+                const matched = new Set();
+                for (let r = 0; r < BOARD_SIZE; r++)
+                    for (let c = 0; c < BOARD_SIZE - 2; c++)
+                        if (isMatch3Logic(currentBoard[r][c], currentBoard[r][c+1], currentBoard[r][c+2]))
+                            { matched.add(`${r},${c}`); matched.add(`${r},${c+1}`); matched.add(`${r},${c+2}`); }
+                for (let r = 0; r < BOARD_SIZE - 2; r++)
+                    for (let c = 0; c < BOARD_SIZE; c++)
+                        if (isMatch3Logic(currentBoard[r][c], currentBoard[r+1][c], currentBoard[r+2][c]))
+                            { matched.add(`${r},${c}`); matched.add(`${r+1},${c}`); matched.add(`${r+2},${c}`); }
+                return matched;
+            };
+
+            const handleCellClick = (r, c) => {
+                if (isProcessing || isGameOver || showRules) return;
+                const clickedPiece = board[r][c];
+                if (!clickedPiece) return;
+                if (chain.length === 0) { setChain([{ r, c }]); playSound('select', 0, soundEnabled, soundSet); return; }
+                const last = chain[chain.length - 1];
+                if (last.r === r && last.c === c) return;
+                const existingIndex = chain.findIndex(p => p.r === r && p.c === c);
+                if (existingIndex !== -1) { setChain(chain.slice(0, existingIndex + 1)); playSound('select', existingIndex, soundEnabled, soundSet); return; }
+                const lastPiece = board[last.r][last.c];
+                const firstPiece = board[chain[0].r][chain[0].c];
+                if (firstPiece && clickedPiece.type === firstPiece.type && clickedPiece.color === firstPiece.color && isValidChessMove(last.r, last.c, r, c, lastPiece.type)) {
+                    const newChain = [...chain, { r, c }];
+                    setChain(newChain);
+                    playSound('select', newChain.length - 1, soundEnabled, soundSet);
+                } else {
+                    setChain([{ r, c }]);
+                    playSound('select', 0, soundEnabled, soundSet);
+                }
+            };
+
+            const handleCellDoubleClick = (r, c) => {
+                if (isProcessing || isGameOver || showRules || chain.length < 3) return;
+                const last = chain[chain.length - 1];
+                if (last.r === r && last.c === c) {
+                    const matchedKeys = new Set();
+                    chain.forEach(p => matchedKeys.add(`${p.r},${p.c}`));
+                    setChain([]);
+                    processMatches(board, matchedKeys);
+                }
+            };
+
+            const toggleHint = () => {
+                if (isProcessing || isGameOver) return;
+                setIsHintActive(!isHintActive);
+                if (!isHintActive) {
+                    playSound('select', 2, soundEnabled, soundSet);
+                }
+            };
+
+            const currentTheme = BOARD_THEMES[boardTheme];
+
+            return (
+                <div className="flex flex-col items-center justify-center min-h-screen p-4 select-none">
+                    <div className="w-full max-w-lg flex justify-between items-center mb-6 px-1">
+                        <div>
+                            <h1 className="text-4xl font-black bg-gradient-to-r from-amber-400 via-orange-500 to-red-600 bg-clip-text text-transparent italic tracking-tighter uppercase leading-none">CHESS MATCH ∞</h1>
+                        </div>
+                        <div className="flex items-center gap-3 text-3xl font-black text-amber-400 px-6 py-2.5 bg-slate-900/80 rounded-2xl border border-slate-700 shadow-xl backdrop-blur-md">
+                            <Trophy size={28} className="text-amber-500" /> <span className="drop-shadow-sm">{score}</span>
+                        </div>
+                    </div>
+
+                    {gameMode === 'blitz' && (
+                        <div className="w-full max-w-lg mb-6 flex flex-col gap-2 p-1">
+                            <div className="flex justify-between items-end px-1">
+                                <div className="flex items-center gap-2 text-amber-500 font-black text-sm uppercase italic tracking-widest drop-shadow-md">
+                                    <Timer size={20} /> MODO RELÁMPAGO
+                                </div>
+                                <div className={`text-3xl font-black font-mono leading-none ${blitzTime < 15 ? 'text-red-500 animate-pulse' : 'text-amber-400'}`}>
+                                    {String(blitzTime).padStart(2, '0')}<span className="text-lg ml-0.5">S</span>
+                                </div>
+                            </div>
+                            <div className="h-3 bg-slate-900 rounded-full overflow-hidden border border-slate-800 shadow-inner">
+                                <div className={`h-full transition-all duration-1000 shadow-lg ${blitzTime < 15 ? 'bg-gradient-to-r from-red-600 to-orange-500' : 'bg-gradient-to-r from-amber-500 to-yellow-300'}`} style={{ width: `${(blitzTime / 60) * 100}%` }} />
+                            </div>
+                        </div>
+                    )}
+
+                    <div className={`h-8 mb-4 flex items-center justify-center font-black uppercase tracking-widest text-sm drop-shadow-lg ${isProcessing ? 'text-red-400 animate-pulse' : 'text-amber-300'}`}>{message}</div>
+
+                    <div className={`relative p-2 rounded-[2.5rem] shadow-[0_20px_50px_rgba(0,0,0,0.5)] border-[10px] ${currentTheme.bg} ${currentTheme.border}`}>
+                        <div className="relative overflow-hidden rounded-3xl" style={{ width: 'min(88vw, 420px)', height: 'min(88vw, 420px)' }}>
+                            <div className={`grid grid-cols-8 gap-0 w-full h-full ${currentTheme.grid}`}>
+                                {board.map((row, r) => row.map((piece, c) => {
+                                    const chainIdx = chain.findIndex(p => p.r === r && p.c === c);
+                                    const isHinted = hintedMoves.some(p => p.r === r && p.c === c);
+                                    let cellClass = (r + c) % 2 === 1 ? currentTheme.dark : currentTheme.light;
+                                    if (chainIdx !== -1) {
+                                        cellClass = chainIdx === 0 ? 'bg-yellow-400 z-30 shadow-inner' : (chainIdx === chain.length - 1 ? 'bg-red-600 z-40 shadow-lg' : 'bg-orange-400 z-20');
+                                    }
+                                    return (
+                                        <div 
+                                            key={`${r}-${c}`} 
+                                            onClick={() => handleCellClick(r, c)} 
+                                            onDoubleClick={() => handleCellDoubleClick(r, c)} 
+                                            className={`relative flex items-center justify-center transition-all ${cellClass} ${isProcessing || isGameOver ? 'pointer-events-none' : 'cursor-pointer hover:opacity-90'} ${isHinted ? 'hint-cell' : ''}`}
+                                        >
+                                            {piece && (
+                                                <div className="absolute w-full h-full flex items-center justify-center pointer-events-none" style={{ fontSize: `${pieceSize}px` }}>
+                                                    <span className={`${chainIdx !== -1 ? 'text-white' : (piece.color === 'white' ? 'text-white' : 'text-slate-900')} drop-shadow-[0_2px_4px_rgba(0,0,0,0.3)]`}>
+                                                        {pieceSet === 'unicode' ? UNICODE_ICONS[piece.type][piece.color] : <i className={`fas ${FONT_AWESOME_ICONS[piece.type]}`} />}
+                                                    </span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                }))}
+                            </div>
+                            <svg className="absolute inset-0 pointer-events-none z-30 w-full h-full">
+                                {chain.length > 1 && chain.map((point, i) => {
+                                    if (i === 0) return null;
+                                    const prev = chain[i - 1];
+                                    return <line key={i} x1={`${prev.c * 12.5 + 6.25}%`} y1={`${prev.r * 12.5 + 6.25}%`} x2={`${point.c * 12.5 + 6.25}%`} y2={`${point.r * 12.5 + 6.25}%`} stroke="white" strokeWidth="4" strokeLinecap="round" strokeDasharray="1,2" className="animate-[pulse_1.5s_infinite]" />;
+                                })}
+                            </svg>
+                            <div className="absolute inset-0 pointer-events-none z-50">
+                                {explosions.map(exp => (
+                                    <React.Fragment key={exp.id}>
+                                        {[...Array(12)].map((_, i) => (
+                                            <div key={i} className="particle" style={{ left: `${exp.c * 12.5 + 6.25}%`, top: `${exp.r * 12.5 + 6.25}%`, backgroundColor: exp.color, '--tx': (Math.cos((i/12)*360*Math.PI/180)*60)+'px', '--ty': (Math.sin((i/12)*360*Math.PI/180)*60)+'px' }} />
+                                        ))}
+                                    </React.Fragment>
+                                ))}
+                            </div>
+                            {isGameOver && (
+                                <div className="absolute inset-0 bg-slate-950/95 flex flex-col items-center justify-center z-[60] p-8 text-center text-white backdrop-blur-md">
+                                    <History size={100} className="text-red-500 mb-8 animate-bounce" />
+                                    <h2 className="text-5xl font-black italic tracking-tighter mb-4 uppercase">FIN DEL JUEGO</h2>
+                                    <div className="text-8xl font-black text-amber-500 mb-10 drop-shadow-[0_0_20px_rgba(245,158,11,0.5)]">{score}</div>
+                                    <button onClick={() => location.reload()} className="px-12 py-5 bg-gradient-to-r from-red-600 to-orange-600 hover:from-red-500 hover:to-orange-500 font-black rounded-3xl flex items-center gap-4 uppercase tracking-[0.2em] shadow-2xl transition-transform active:scale-95">REINTENTAR</button>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                    
+                    <div className="w-full max-w-lg mt-10 space-y-5">
+                        <div className="grid grid-cols-3 gap-4">
+                            <div className="glass-panel p-4 rounded-[2rem] flex flex-col items-center shadow-xl">
+                                <span className="text-[11px] text-slate-300 font-black uppercase mb-3 tracking-widest flex items-center gap-1.5"><Lightbulb size={12} className="text-amber-400" /> PIEZAS</span>
+                                <div className="flex gap-2 w-full">
+                                    <button onClick={() => setPieceSet('unicode')} className={`flex-1 py-2 rounded-2xl text-xs font-black transition-all ${pieceSet === 'unicode' ? 'bg-amber-500 text-slate-950 shadow-lg' : 'bg-slate-800 text-slate-200 hover:bg-slate-700'}`}>UNI</button>
+                                    <button onClick={() => setPieceSet('fa')} className={`flex-1 py-2 rounded-2xl text-xs font-black transition-all ${pieceSet === 'fa' ? 'bg-amber-500 text-slate-950 shadow-lg' : 'bg-slate-800 text-slate-200 hover:bg-slate-700'}`}>ICO</button>
+                                </div>
+                            </div>
+                            <div className="glass-panel p-4 rounded-[2rem] flex flex-col items-center shadow-xl">
+                                <span className="text-[11px] text-slate-300 font-black uppercase mb-3 tracking-widest flex items-center gap-1.5"><Zap size={12} className="text-blue-400" /> ESCALA</span>
+                                <div className="flex items-center gap-3">
+                                    <button onClick={() => setPieceSize(s => Math.max(16, s - 2))} className="p-2.5 bg-slate-800 text-white rounded-xl hover:bg-slate-700 transition-colors shadow-md active:scale-90"><Minus size={18} strokeWidth={3} /></button>
+                                    <span className="text-sm font-black text-white min-w-[1.5rem] text-center">{pieceSize}</span>
+                                    <button onClick={() => setPieceSize(s => Math.min(44, s + 2))} className="p-2.5 bg-slate-800 text-white rounded-xl hover:bg-slate-700 transition-colors shadow-md active:scale-90"><Plus size={18} strokeWidth={3} /></button>
+                                </div>
+                            </div>
+                            <div className="glass-panel p-4 rounded-[2rem] flex flex-col items-center shadow-xl">
+                                <span className="text-[11px] text-slate-300 font-black uppercase mb-3 tracking-widest flex items-center gap-1.5 uppercase">TEMAS</span>
+                                <div className="flex justify-center gap-3 mt-1">
+                                    {Object.keys(BOARD_THEMES).map(k => (
+                                        <button key={k} onClick={() => setBoardTheme(k)} className={`w-7 h-7 rounded-full ${BOARD_THEMES[k].dark} transition-transform hover:scale-125 ${boardTheme === k ? 'ring-2 ring-white ring-offset-2 ring-offset-slate-900 scale-110 shadow-lg' : 'opacity-60 shadow-md'}`} />
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="flex gap-3 items-center h-16">
+                            <button onClick={() => setGameMode(m => m === 'normal' ? 'blitz' : 'normal')} className={`flex-1 h-full rounded-3xl border-2 flex items-center justify-center gap-3 transition-all shadow-lg active:scale-95 ${gameMode === 'blitz' ? 'bg-red-600 border-red-400 text-white' : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'}`}>
+                                <Swords size={24} className={gameMode === 'blitz' ? 'animate-pulse' : ''} />
+                                <span className="text-sm font-black uppercase tracking-widest">{gameMode === 'blitz' ? 'BLITZ' : 'NORMAL'}</span>
+                            </button>
+                            
+                            <button onClick={() => setShowRules(true)} className="px-5 h-full bg-slate-800 text-amber-400 rounded-3xl border-2 border-slate-700 hover:bg-slate-700 transition-all shadow-lg active:scale-95">
+                                <Info size={24} strokeWidth={2.5} />
+                            </button>
+
+                            <button 
+                                onClick={toggleHint} 
+                                className={`px-5 h-full rounded-3xl border-2 transition-all shadow-lg active:scale-95 ${isHintActive ? 'bg-yellow-500 border-yellow-300 text-slate-950 scale-105' : 'bg-slate-800 border-slate-700 text-yellow-400 hover:bg-slate-700'}`}
+                            >
+                                <Lightbulb size={24} strokeWidth={isHintActive ? 3 : 2.5} />
+                            </button>
+
+                            <button onClick={() => location.reload()} className="px-5 h-full bg-gradient-to-br from-orange-500 to-red-600 hover:from-orange-400 hover:to-red-500 text-white font-black rounded-3xl border-2 border-orange-400 shadow-xl transition-all active:scale-95 flex items-center justify-center">
+                                <RefreshCw size={24} strokeWidth={2.5} />
+                            </button>
+
+                            <div className="flex bg-slate-900/90 rounded-3xl border-2 border-slate-700 p-1.5 gap-2 h-full shadow-xl">
+                                <button onClick={() => setSoundSet(s => s === 'classic' ? 'galactic' : 'classic')} className={`p-3 rounded-2xl transition-all ${soundSet === 'galactic' ? 'bg-purple-600 text-white' : 'bg-slate-800 text-slate-400'}`}>
+                                    <Music size={20} />
+                                </button>
+                                <button onClick={() => setSoundEnabled(!soundEnabled)} className={`p-3 rounded-2xl transition-all ${soundEnabled ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-900/20' : 'bg-slate-800 text-slate-400'}`}>
+                                    {soundEnabled ? <Volume2 size={20} /> : <VolumeX size={20} />}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    {showRules && <RulesModal onClose={() => setShowRules(false)} />}
+                </div>
+            );
+        }
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
